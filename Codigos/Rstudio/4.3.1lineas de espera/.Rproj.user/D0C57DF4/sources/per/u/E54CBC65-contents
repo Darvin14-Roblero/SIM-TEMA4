@@ -1,0 +1,166 @@
+library(shiny)
+library(simmer)
+library(ggplot2)
+library(dplyr)
+
+# ----------------------------------------------------------------------
+# 1. INTERFAZ DE USUARIO (UI)
+# ----------------------------------------------------------------------
+ui <- fluidPage(
+  theme = bslib::bs_theme(bootswatch = "flatly"),
+  titlePanel("Subtema 4.3.1 - Líneas de Espera (Sistema M/M/1 en R)"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h4("Parámetros del Sistema"),
+      numericInput("lambda", "Tasa de Llegada λ (clientes/min):", value = 0.5, min = 0.01, step = 0.1),
+      numericInput("mu", "Tasa de Servicio μ (clientes/min):", value = 0.8, min = 0.01, step = 0.1),
+      numericInput("tiempo_max", "Tiempo de Simulación (min):", value = 480, min = 60, step = 60),
+      actionButton("run", "Simular Línea de Espera", class = "btn-success w-100", icon = icon("play")),
+      hr(),
+      helpText("Compara métricas simuladas (DES simmer) vs. Teoría analítica M/M/1.")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Tabla Comparativa", 
+                 br(),
+                 tableOutput("tabla_comparativa"),
+                 hr(),
+                 verbatimTextOutput("resumen_ejecucion")),
+        tabPanel("Distribución de Espera (Wq)", 
+                 br(),
+                 plotOutput("plot_histograma", height = "350px"))
+      )
+    )
+  )
+)
+
+# ----------------------------------------------------------------------
+# 2. LÓGICA DEL SERVIDOR (SERVER)
+# ----------------------------------------------------------------------
+server <- function(input, output) {
+  
+  resultados <- eventReactive(input$run, {
+    lambda <- input$lambda
+    mu <- input$mu
+    tiempo_limite <- input$tiempo_max
+    
+    # Validar estabilidad del sistema
+    if (lambda >= mu) {
+      showNotification("Advertencia: λ debe ser menor que μ para estabilidad (ρ < 1).", type = "warning")
+    }
+    
+    # Crear modelo simmer
+    env <- simmer("MM1_System")
+    
+    cliente <- trajectory("Cliente") %>%
+      seize("servidor", 1) %>%
+      timeout(function() rexp(1, mu)) %>%
+      release("servidor", 1)
+    
+    env %>%
+      add_resource("servidor", capacity = 1) %>%
+      add_generator("Cliente", cliente, function() rexp(1, lambda)) %>%
+      run(until = tiempo_limite)
+    
+    # Extraer métricas
+    llegadas <- get_mon_arrivals(env)
+    recursos <- get_mon_resources(env)
+    
+    list(lambda = lambda, mu = mu, tiempo = tiempo_limite, llegadas = llegadas, recursos = recursos)
+  }, ignoreNULL = FALSE)
+  
+  # Tabla Comparativa: Simulación vs. Teoría M/M/1
+  output$tabla_comparativa <- renderTable({
+    res <- resultados()
+    llegadas <- res$llegadas
+    recursos <- res$recursos
+    
+    if (nrow(llegadas) == 0) return(NULL)
+    
+    # Tiempos por cliente
+    df <- llegadas %>%
+      mutate(
+        Wq = end_time - start_time - activity_time, # Espera en cola
+        W  = end_time - start_time                 # Tiempo total en sistema
+      )
+    
+    # Métricas Simuladas
+    Wq_sim <- mean(df$Wq)
+    W_sim  <- mean(df$W)
+    
+    # Área bajo la curva para Lq y Rho
+    dt <- c(diff(recursos$time), res$tiempo - max(recursos$time))
+    Lq_sim <- sum(recursos$queue * dt) / res$tiempo
+    rho_sim <- sum(recursos$server * dt) / res$tiempo
+    L_sim  <- Lq_sim + rho_sim
+    
+    # Métricas Teóricas M/M/1
+    rho_teo <- res$lambda / res$mu
+    L_teo   <- rho_teo / (1 - rho_teo)
+    Lq_teo  <- (rho_teo^2) / (1 - rho_teo)
+    W_teo   <- 1 / (res$mu - res$lambda)
+    Wq_teo  <- res$lambda / (res$mu * (res$mu - res$lambda))
+    
+    data.frame(
+      `Métrica de Desempeño` = c(
+        "Factor de Utilización del Servidor (ρ)",
+        "Tiempo Medio en Cola Wq (min)",
+        "Tiempo Medio en Sistema W (min)",
+        "Clientes Promedio en Cola (Lq)",
+        "Clientes Promedio en Sistema (L)"
+      ),
+      `Valor Simulado` = c(
+        round(rho_sim, 4),
+        round(Wq_sim, 4),
+        round(W_sim, 4),
+        round(Lq_sim, 4),
+        round(L_sim, 4)
+      ),
+      `Valor Teórico (M/M/1)` = c(
+        round(rho_teo, 4),
+        round(Wq_teo, 4),
+        round(W_teo, 4),
+        round(Lq_teo, 4),
+        round(L_teo, 4)
+      )
+    )
+  }, striped = TRUE, hover = TRUE, bordered = TRUE)
+  
+  # Resumen en texto
+  output$resumen_ejecucion <- renderText({
+    res <- resultados()
+    llegadas <- res$llegadas
+    
+    paste0(
+      "--- RESUMEN DE EJECUCIÓN ---\n",
+      "Tiempo Total Simulado: ", res$tiempo, " minutos\n",
+      "Total de Clientes Ingresados: ", nrow(llegadas), "\n",
+      "Total de Clientes Atendidos: ", sum(llegadas$finished), "\n"
+    )
+  })
+  
+  # Histograma de Tiempos de Espera
+  output$plot_histograma <- renderPlot({
+    res <- resultados()
+    llegadas <- res$llegadas
+    if (nrow(llegadas) == 0) return(NULL)
+    
+    df <- llegadas %>%
+      mutate(Wq = end_time - start_time - activity_time)
+    
+    ggplot(df, aes(x = Wq)) +
+      geom_histogram(fill = "#2ecc71", color = "white", bins = 25) +
+      labs(title = "Distribución del Tiempo de Espera en Cola (Wq)",
+           x = "Tiempo de Espera en Cola (minutos)",
+           y = "Frecuencia de Clientes") +
+      theme_minimal(base_size = 14)
+  })
+}
+
+# ----------------------------------------------------------------------
+# 3. EJECUCIÓN DE LA APP
+# ----------------------------------------------------------------------
+shinyApp(ui = ui, server = server)
+

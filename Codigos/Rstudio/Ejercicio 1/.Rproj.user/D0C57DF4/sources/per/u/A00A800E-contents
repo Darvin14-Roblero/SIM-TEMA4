@@ -1,0 +1,209 @@
+library(shiny)
+
+# ==============================================================================
+# INTERFAZ DE USUARIO (UI)
+# ==============================================================================
+ui <- fluidPage(
+  titlePanel("Sistema Integrado de Simulación y Análisis Estadístico en R"),
+  
+  tabsetPanel(
+    
+    # --------------------------------------------------------------------------
+    # 4.3.1 LÍNEAS DE ESPERA (Simulación M/M/1)
+    # --------------------------------------------------------------------------
+    tabPanel("4.3.1 Líneas de Espera",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("lambda", "Tasa de llegada (λ clientes/hora):", value = 4, min = 0.1, step = 0.5),
+                 numericInput("mu", "Tasa de servicio (μ clientes/hora):", value = 6, min = 0.1, step = 0.5),
+                 numericInput("n_clientes", "Número de clientes a simular:", value = 100, min = 10, max = 1000),
+                 actionButton("btn_colas", "Ejecutar Simulación", class = "btn-primary")
+               ),
+               mainPanel(
+                 verbatimTextOutput("res_colas"),
+                 plotOutput("plot_colas")
+               )
+             )
+    ),
+    
+    # --------------------------------------------------------------------------
+    # 4.3.2 SISTEMAS DE INVENTARIOS (Modelo EOQ)
+    # --------------------------------------------------------------------------
+    tabPanel("4.3.2 Sistemas de Inventarios",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("demanda", "Demanda Anual (D):", value = 1000, min = 1),
+                 numericInput("costo_pedido", "Costo de Pedir (S $):", value = 50, min = 1),
+                 numericInput("costo_manten", "Costo Mantenimiento (H $/unid/año):", value = 2.5, min = 0.1),
+                 actionButton("btn_inv", "Calcular Inventario", class = "btn-primary")
+               ),
+               mainPanel(
+                 verbatimTextOutput("res_inv"),
+                 plotOutput("plot_inv")
+               )
+             )
+    ),
+    
+    # --------------------------------------------------------------------------
+    # 4.4.1 PRUEBAS PARAMÉTRICAS (Prueba t de Student)
+    # --------------------------------------------------------------------------
+    tabPanel("4.4.1 Pruebas Paramétricas",
+             sidebarLayout(
+               sidebarPanel(
+                 numericInput("mu0", "Media Teórica Pob. (μ₀):", value = 70),
+                 textInput("muestra", "Muestra (sep. por comas):", value = "72.5, 68.1, 75.0, 71.3, 69.8, 74.2, 73.0, 70.5"),
+                 actionButton("btn_test", "Ejecutar Prueba t", class = "btn-primary")
+               ),
+               mainPanel(
+                 verbatimTextOutput("res_test"),
+                 plotOutput("plot_test")
+               )
+             )
+    )
+  )
+)
+
+# ==============================================================================
+# LÓGICA DEL SERVIDOR (SERVER)
+# ==============================================================================
+server <- function(input, output) {
+  
+  # ----------------------------------------------------------------------------
+  # Lógica 4.3.1: Líneas de Espera
+  # ----------------------------------------------------------------------------
+  observeEvent(input$btn_colas, {
+    lambda <- input$lambda
+    mu <- input$mu
+    n <- input$n_clientes
+    
+    # Simulación por eventos discretos
+    inter_llegadas <- rexp(n, rate = lambda)
+    t_llegada <- cumsum(inter_llegadas)
+    t_servicio <- rexp(n, rate = mu)
+    
+    t_inicio <- numeric(n)
+    t_fin <- numeric(n)
+    
+    t_inicio[1] <- t_llegada[1]
+    t_fin[1] <- t_inicio[1] + t_servicio[1]
+    
+    for (i in 2:n) {
+      t_inicio[i] <- max(t_llegada[i], t_fin[i - 1])
+      t_fin[i] <- t_inicio[i] + t_servicio[i]
+    }
+    
+    t_espera <- t_inicio - t_llegada
+    t_sistema <- t_fin - t_llegada
+    
+    output$res_colas <- renderText({
+      paste0(
+        "=== RESULTADOS SIMULACIÓN M/M/1 ===\n",
+        "Clientes simulados:              ", n, "\n",
+        "Tiempo prom. en cola (Wq):       ", round(mean(t_espera) * 60, 2), " minutos\n",
+        "Tiempo prom. en sistema (W):     ", round(mean(t_sistema) * 60, 2), " minutos\n",
+        "Factor de utilización (rho):     ", round((lambda / mu) * 100, 2), " %\n"
+      )
+    })
+    
+    output$plot_colas <- renderPlot({
+      plot(t_espera * 60, type = "b", col = "#2980b9", pch = 19,
+           xlab = "Número de Cliente", ylab = "Tiempo de Espera en Cola (minutos)",
+           main = "Tiempo de Espera por Cliente")
+      abline(h = mean(t_espera) * 60, col = "red", lty = 2, lwd = 2)
+      legend("topright", legend = c("Cliente", "Espera Promedio"), col = c("#2980b9", "red"), lty = c(1, 2))
+    })
+  })
+  
+  # ----------------------------------------------------------------------------
+  # Lógica 4.3.2: Inventarios (EOQ)
+  # ----------------------------------------------------------------------------
+  observeEvent(input$btn_inv, {
+    D <- input$demanda
+    S <- input$costo_pedido
+    H <- input$costo_manten
+    
+    Q_opt <- sqrt((2 * D * S) / H)
+    num_pedidos <- D / Q_opt
+    costo_ordenar <- num_pedidos * S
+    costo_mantener <- (Q_opt / 2) * H
+    costo_total <- costo_ordenar + costo_mantener
+    
+    output$res_inv <- renderText({
+      paste0(
+        "=== MODELO DE INVENTARIO (EOQ) ===\n",
+        "Lote Económico de Pedido (Q*):   ", round(Q_opt, 2), " unidades\n",
+        "Número de pedidos al año:        ", round(num_pedidos, 2), "\n",
+        "Costo Anual de Ordenar:           $", round(costo_ordenar, 2), "\n",
+        "Costo Anual de Mantenimiento:     $", round(costo_mantener, 2), "\n",
+        "---------------------------------------\n",
+        "COSTO TOTAL MÍNIMO:               $", round(costo_total, 2)
+      )
+    })
+    
+    output$plot_inv <- renderPlot({
+      q_vals <- seq(max(10, Q_opt - 300), Q_opt + 300, length.out = 200)
+      c_ordenar <- (D / q_vals) * S
+      c_mantener <- (q_vals / 2) * H
+      c_total <- c_ordenar + c_mantener
+      
+      plot(q_vals, c_total, type = "l", col = "black", lwd = 2,
+           ylim = c(0, max(c_total)),
+           xlab = "Tamaño del Lote (Q)", ylab = "Costo Anual ($)",
+           main = "Curvas de Costos de Inventario")
+      lines(q_vals, c_ordenar, col = "blue", lty = 2)
+      lines(q_vals, c_mantener, col = "green", lty = 2)
+      abline(v = Q_opt, col = "red", lty = 3, lwd = 2)
+      
+      legend("topright", legend = c("Costo Total", "Costo Pedido", "Costo Mantenimiento", "Q* Óptimo"),
+             col = c("black", "blue", "green", "red"), lty = c(1, 2, 2, 3))
+    })
+  })
+  
+  # ----------------------------------------------------------------------------
+  # Lógica 4.4.1: Prueba Paramétrica (t de Student)
+  # ----------------------------------------------------------------------------
+  observeEvent(input$btn_test, {
+    mu0 <- input$mu0
+    datos <- as.numeric(trimws(unlist(strsplit(input$muestra, ","))))
+    datos <- datos[!is.na(datos)]
+    
+    res_t <- t.test(datos, mu = mu0)
+    
+    output$res_test <- renderText({
+      paste0(
+        "=== PRUEBA PARAMÉTRICA (t de Student) ===\n",
+        "Tamaño de la muestra (n):        ", length(datos), "\n",
+        "Media Muestral (x_bar):          ", round(mean(datos), 4), "\n",
+        "Desviación Estándar (s):         ", round(sd(datos), 4), "\n",
+        "Estadístico t observado:         ", round(res_t$statistic, 4), "\n",
+        "p-valor:                         ", round(res_t$p.value, 6), "\n",
+        "---------------------------------------\n",
+        "Decisión (alpha = 0.05):\n",
+        if (res_t$p.value < 0.05) "--> Se RECHAZA H0: Hay diferencia significativa." 
+        else "--> NO se rechaza H0: No hay suficiente evidencia de diferencia."
+      )
+    })
+    
+    output$plot_test <- renderPlot({
+      df <- length(datos) - 1
+      t_obs <- res_t$statistic
+      
+      x <- seq(-4, 4, length = 200)
+      y <- dt(x, df = df)
+      
+      plot(x, y, type = "l", col = "black", lwd = 2,
+           main = paste("Distribución t (df =", df, ") y Estadístico Observado"),
+           xlab = "Valor t", ylab = "Densidad")
+      
+      abline(v = t_obs, col = "red", lwd = 2, lty = 2)
+      abline(v = c(-qt(0.975, df), qt(0.975, df)), col = "blue", lty = 3)
+      legend("topright", legend = c("Distribución t", "t Observado", "Límites Críticos (α=0.05)"),
+             col = c("black", "red", "blue"), lty = c(1, 2, 3))
+    })
+  })
+}
+
+# ==============================================================================
+# EJECUTAR APLICACIÓN
+# ==============================================================================
+shinyApp(ui = ui, server = server)

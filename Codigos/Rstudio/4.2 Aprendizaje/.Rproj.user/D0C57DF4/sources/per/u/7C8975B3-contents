@@ -1,0 +1,142 @@
+library(shiny)
+library(simmer)
+library(simmer.plot)
+library(ggplot2)
+library(dplyr)
+
+# ----------------------------------------------------------------------
+# 1. INTERFAZ DE USUARIO (UI)
+# ----------------------------------------------------------------------
+ui <- fluidPage(
+  theme = bslib::bs_theme(bootswatch = "flatly"),
+  titlePanel("Simulador de Eventos Discretos (DES) - Tema 4.2 (R simmer)"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      h4("Parámetros del Sistema"),
+      numericInput("llegadas", "Tiempo Medio entre Llegadas (min):", value = 3.0, min = 0.1, step = 0.5),
+      numericInput("servicio", "Tiempo Medio de Servicio (min):", value = 2.0, min = 0.1, step = 0.5),
+      numericInput("tiempo_total", "Tiempo Total a Simular (min):", value = 120, min = 10, step = 10),
+      actionButton("run", "Ejecutar Simulación", class = "btn-primary w-100", icon = icon("play")),
+      hr(),
+      helpText("Este modelo utiliza el paquete 'simmer' para simular un proceso M/M/1 y Shiny/ggplot2 para visualización profesional.")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Monitoreo de Recursos", 
+                 plotOutput("plot_recurso", height = "350px"),
+                 plotOutput("plot_tiempos", height = "250px")),
+        tabPanel("Métricas y Resumen", 
+                 br(),
+                 tableOutput("tabla_metricas")),
+        tabPanel("Traza de Clientes (Event Trace)", 
+                 br(),
+                 tableOutput("tabla_traza"))
+      )
+    )
+  )
+)
+
+# ----------------------------------------------------------------------
+# 2. LÓGICA DEL SERVIDOR (SERVER)
+# ----------------------------------------------------------------------
+server <- function(input, output) {
+  
+  # Ejecución reactiva de la simulación
+  resultados <- eventReactive(input$run, {
+    
+    # Crear el entorno de simulación
+    env <- simmer("Simulacion_MM1")
+    
+    # Definir la trayectoria del cliente/entidad
+    cliente <- trajectory("Trayectoria_Cliente") %>%
+      seize("servidor", 1) %>%
+      timeout(function() rexp(1, 1 / input$servicio)) %>%
+      release("servidor", 1)
+    
+    # Configurar recursos y generador de llegadas
+    env %>%
+      add_resource("servidor", capacity = 1) %>%
+      add_generator("Cliente", cliente, function() rexp(1, 1 / input$llegadas)) %>%
+      run(until = input$tiempo_total)
+    
+    # Extraer datos de la simulación
+    llegadas_df <- get_mon_arrivals(env)
+    recursos_df <- get_mon_resources(env)
+    
+    list(env = env, llegadas = llegadas_df, recursos = recursos_df)
+  }, ignoreNULL = FALSE) # Se ejecuta una vez al cargar la app
+  
+  # Gráfico 1: Uso del Servidor y Cola a lo largo del tiempo
+  output$plot_recurso <- renderPlot({
+    res <- resultados()
+    if (nrow(res$recursos) == 0) return(NULL)
+    
+    plot(res$recursos, metric = "usage", "servidor", items = c("queue", "server")) +
+      labs(title = "Evolución del Servidor y Cola en el Tiempo",
+           x = "Tiempo de Simulación (min)", y = "Número de Clientes") +
+      theme_minimal(base_size = 13) +
+      theme(legend.position = "bottom")
+  })
+  
+  # Gráfico 2: Distribución de Tiempos de Espera y Servicio
+  output$plot_tiempos <- renderPlot({
+    res <- resultados()
+    llegadas <- res$llegadas
+    if (nrow(llegadas) == 0) return(NULL)
+    
+    llegadas <- llegadas %>%
+      mutate(tiempo_espera = end_time - start_time - activity_time)
+    
+    ggplot(llegadas, aes(x = tiempo_espera)) +
+      geom_histogram(fill = "#3498db", color = "white", bins = 20) +
+      labs(title = "Distribución del Tiempo de Espera en Cola",
+           x = "Tiempo de Espera (min)", y = "Frecuencia de Clientes") +
+      theme_minimal(base_size = 13)
+  })
+  
+  # Tabla 1: Métricas Globales del Sistema
+  output$tabla_metricas <- renderTable({
+    res <- resultados()
+    llegadas <- res$llegadas
+    if (nrow(llegadas) == 0) return(NULL)
+    
+    llegadas <- llegadas %>%
+      mutate(tiempo_espera = end_time - start_time - activity_time,
+             tiempo_sistema = end_time - start_time)
+    
+    data.frame(
+      Métrica = c("Total de Clientes Ingresados", 
+                  "Clientes Atendidos Completamente", 
+                  "Tiempo Medio de Espera en Cola (min)", 
+                  "Tiempo Medio Total en Sistema (min)"),
+      Valor = c(nrow(llegadas),
+                sum(llegadas$finished),
+                round(mean(llegadas$tiempo_espera), 2),
+                round(mean(llegadas$tiempo_sistema), 2))
+    )
+  }, striped = TRUE, hover = TRUE, bordered = TRUE)
+  
+  # Tabla 2: Traza individual de los primeros 10 clientes
+  output$tabla_traza <- renderTable({
+    res <- resultados()
+    llegadas <- res$llegadas
+    if (nrow(llegadas) == 0) return(NULL)
+    
+    llegadas %>%
+      head(10) %>%
+      transmute(
+        `ID Cliente` = name,
+        `Llegada (min)` = round(start_time, 2),
+        `Salida (min)` = round(end_time, 2),
+        `T. Servicio (min)` = round(activity_time, 2),
+        `Atendido Completo` = ifelse(finished, "Sí", "No")
+      )
+  }, striped = TRUE, hover = TRUE)
+}
+
+# ----------------------------------------------------------------------
+# 3. LANZAMIENTO DE LA APLICACIÓN
+# ----------------------------------------------------------------------
+shinyApp(ui = ui, server = server)
